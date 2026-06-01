@@ -212,18 +212,84 @@ def check_camelot_csv(orders: list[dict], lookup: dict) -> dict:
 
 # ---------- Issue detection ----------
 
+_AWAITING_STATUSES = {"CHARGED", "COMMITTED", "PICK PRTD"}
+
 def _issue_label(camelot_result: dict, shopify_tracking: str) -> str:
-    error = camelot_result.get("error")
+    if camelot_result.get("error") is not None:
+        return "🔴 Order not transmitted to Camelot"
+
     status = camelot_result.get("status") or {}
+    camelot_status = status.get("status", "").upper()
+    camelot_tracking = status.get("tracking_number", "")
 
-    if error is not None:
-        return "🔴 Not in Camelot"
+    if camelot_status in _AWAITING_STATUSES:
+        return "🟠 Awaiting picking"
 
-    camelot_tracking = status.get("tracking_number", "") if status else ""
-    if camelot_tracking and not shopify_tracking:
-        return "🟡 Tracking missing in Shopify"
+    if camelot_status == "SHIPPED-NOPACKITEM":
+        if camelot_tracking and not shopify_tracking:
+            return "🔴 Tracking not pushed back to Shopify"
+        if not camelot_tracking:
+            return "🟡 Shipped but no Camelot tracking"
+        if camelot_tracking and shopify_tracking:
+            return "🟢 Shipped & synced"
 
     return ""
+
+
+# ---------- CSV loader helper ----------
+
+def _load_csv_upload(file_upload, key_prefix: str) -> dict | None:
+    """Render column selectors for an uploaded file and return a lookup dict, or None if no file."""
+    if file_upload is None:
+        return None
+    try:
+        if file_upload.name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(file_upload, dtype=str)
+        else:
+            raw = file_upload.read()
+            for enc in ("utf-8-sig", "latin-1", "cp1252", "utf-16"):
+                try:
+                    import io
+                    df = pd.read_csv(io.BytesIO(raw), dtype=str, encoding=enc)
+                    break
+                except (UnicodeDecodeError, Exception):
+                    continue
+            else:
+                st.error("Could not detect file encoding. Try saving the CSV as UTF-8 from Excel.")
+                st.stop()
+    except Exception as e:
+        st.error(f"Could not read file: {e}")
+        st.stop()
+
+    st.success(f"{len(df)} rows loaded — {len(df.columns)} columns detected.")
+    cols = list(df.columns)
+
+    def _best(keywords):
+        for k in keywords:
+            m = next((c for c in cols if k in c.lower()), None)
+            if m:
+                return cols.index(m)
+        return 0
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        ref_col = st.selectbox("Reference column (= Shopify order #)", cols,
+                               index=_best(["ref", "your ref", "external", "order no", "order #"]),
+                               key=f"{key_prefix}_ref")
+    with c2:
+        tracking_col = st.selectbox("Tracking number column", cols,
+                                    index=_best(["track"]), key=f"{key_prefix}_tracking")
+    with c3:
+        status_options = ["(none)"] + cols
+        status_col = st.selectbox("Status column (optional)", status_options,
+                                  index=_best(["status"]) + 1, key=f"{key_prefix}_status")
+
+    st.dataframe(
+        df[[ref_col, tracking_col] + ([status_col] if status_col != "(none)" else [])].head(10),
+        use_container_width=True, hide_index=True,
+    )
+    return build_camelot_lookup(df, ref_col, tracking_col,
+                                status_col if status_col != "(none)" else None)
 
 
 # ---------- UI ----------
@@ -248,74 +314,26 @@ camelot_source = st.radio(
     "How to pull Camelot order data?",
     ["API", "CSV upload"],
     horizontal=True,
-    help="API date format issue is pending Camelot support — use CSV export in the meantime.",
 )
 
-camelot_lookup = None  # populated if CSV mode
+camelot_lookup = None        # populated in CSV mode
+pending_lookup: dict = {}    # optional pending orders CSV (API mode)
 
 if camelot_source == "CSV upload":
-    st.caption("Export your orders from the Camelot / Excalibur UI and upload the file below.")
-    uploaded = st.file_uploader("Camelot order export", type=["csv", "xlsx", "xls"])
+    st.caption("Export shipped orders from the Camelot / Excalibur UI and upload below.")
+    camelot_lookup = _load_csv_upload(
+        st.file_uploader("Camelot shipped orders export", type=["csv", "xlsx", "xls"], key="shipped_csv"),
+        key_prefix="shipped",
+    )
 
-    if uploaded is not None:
-        try:
-            if uploaded.name.endswith((".xlsx", ".xls")):
-                df_cam = pd.read_excel(uploaded, dtype=str)
-            else:
-                raw = uploaded.read()
-                for enc in ("utf-8-sig", "latin-1", "cp1252", "utf-16"):
-                    try:
-                        df_cam = pd.read_csv(
-                            __import__("io").BytesIO(raw), dtype=str, encoding=enc
-                        )
-                        break
-                    except (UnicodeDecodeError, Exception):
-                        continue
-                else:
-                    st.error("Could not detect file encoding. Try saving the CSV as UTF-8 from Excel.")
-                    st.stop()
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
-            st.stop()
-
-        st.success(f"{len(df_cam)} rows loaded — {len(df_cam.columns)} columns detected.")
-
-        cols = list(df_cam.columns)
-
-        def _best(keywords):
-            for k in keywords:
-                match = next((c for c in cols if k in c.lower()), None)
-                if match:
-                    return cols.index(match)
-            return 0
-
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            ref_col = st.selectbox(
-                "Reference column (= Shopify order #)",
-                cols, index=_best(["ref", "your ref", "external", "order no", "order #"]),
-            )
-        with mc2:
-            tracking_col = st.selectbox(
-                "Tracking number column",
-                cols, index=_best(["track"]),
-            )
-        with mc3:
-            status_options = ["(none)"] + cols
-            status_col = st.selectbox(
-                "Status column (optional)",
-                status_options, index=_best(["status"]) + 1,
-            )
-
-        st.dataframe(
-            df_cam[[ref_col, tracking_col] + ([status_col] if status_col != "(none)" else [])].head(10),
-            use_container_width=True, hide_index=True,
-        )
-
-        camelot_lookup = build_camelot_lookup(
-            df_cam, ref_col, tracking_col,
-            status_col if status_col != "(none)" else None,
-        )
+else:
+    with st.expander("Upload pending orders CSV (optional)", expanded=False):
+        st.caption("Export pending/unshipped orders from the Camelot web UI and upload below. "
+                   "These will be merged with the API shipped orders so they aren't flagged as missing.")
+        pending_lookup = _load_csv_upload(
+            st.file_uploader("Camelot pending orders export", type=["csv", "xlsx", "xls"], key="pending_csv"),
+            key_prefix="pending",
+        ) or {}
 
 st.divider()
 
@@ -352,11 +370,18 @@ if st.button("Fetch & Check Sync", type="primary"):
             client_code=st.secrets["CAMELOT_CLIENT"],
             trading_partner=st.secrets["CAMELOT_TRADING_PARTNER"],
         )
-        with st.spinner("Fetching Camelot orders…"):
+        with st.spinner("Fetching Camelot shipped orders…"):
             camelot_results = check_camelot_api(orders, camelot, start, end)
+        # Merge pending orders — pending entries don't overwrite shipped ones
+        for ref, data in pending_lookup.items():
+            for num in [ref, ref.lstrip("#"), "#" + ref.lstrip("#")]:
+                if num in camelot_results and camelot_results[num].get("error") is None:
+                    break  # already found as shipped
+            else:
+                camelot_results[ref] = {"status": data, "error": None}
 
     rows = []
-    issues_count = {"not_in_camelot": 0, "tracking_missing": 0}
+    issues_count = {"not_transmitted": 0, "tracking_not_pushed": 0, "awaiting": 0, "no_tracking": 0, "synced": 0}
 
     for o in orders:
         num = o["order_num"]
@@ -369,10 +394,16 @@ if st.button("Fetch & Check Sync", type="primary"):
         shopify_tracking = o["shopify_tracking"]
         issue = _issue_label(cr, shopify_tracking)
 
-        if issue == "🔴 Not in Camelot":
-            issues_count["not_in_camelot"] += 1
-        elif issue == "🟡 Tracking missing in Shopify":
-            issues_count["tracking_missing"] += 1
+        if issue == "🔴 Order not transmitted to Camelot":
+            issues_count["not_transmitted"] += 1
+        elif issue == "🔴 Tracking not pushed back to Shopify":
+            issues_count["tracking_not_pushed"] += 1
+        elif issue == "🟠 Awaiting picking":
+            issues_count["awaiting"] += 1
+        elif issue == "🟡 Shipped but no Camelot tracking":
+            issues_count["no_tracking"] += 1
+        elif issue == "🟢 Shipped & synced":
+            issues_count["synced"] += 1
 
         rows.append({
             "Order Date": o["created_at"],
@@ -384,13 +415,18 @@ if st.button("Fetch & Check Sync", type="primary"):
             "Issue": issue,
         })
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Total Orders", len(rows))
-    m2.metric("Not in Camelot", issues_count["not_in_camelot"],
-              delta=f"⚠ {issues_count['not_in_camelot']}" if issues_count["not_in_camelot"] else None,
+    m2.metric("🟢 Shipped & synced", issues_count["synced"])
+    m3.metric("🟠 Awaiting picking", issues_count["awaiting"])
+    m4.metric("🔴 Not transmitted", issues_count["not_transmitted"],
+              delta=f"⚠ {issues_count['not_transmitted']}" if issues_count["not_transmitted"] else None,
               delta_color="inverse")
-    m3.metric("Tracking Missing in Shopify", issues_count["tracking_missing"],
-              delta=f"⚠ {issues_count['tracking_missing']}" if issues_count["tracking_missing"] else None,
+    m5.metric("🔴 Tracking not pushed", issues_count["tracking_not_pushed"],
+              delta=f"⚠ {issues_count['tracking_not_pushed']}" if issues_count["tracking_not_pushed"] else None,
+              delta_color="inverse")
+    m6.metric("🟡 No Camelot tracking", issues_count["no_tracking"],
+              delta=f"⚠ {issues_count['no_tracking']}" if issues_count["no_tracking"] else None,
               delta_color="inverse")
 
     st.divider()
