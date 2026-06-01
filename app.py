@@ -245,7 +245,7 @@ st.divider()
 st.subheader("Camelot data source")
 camelot_source = st.radio(
     "How to pull Camelot order data?",
-    ["CSV upload", "API"],
+    ["API", "CSV upload"],
     horizontal=True,
     help="API date format issue is pending Camelot support — use CSV export in the meantime.",
 )
