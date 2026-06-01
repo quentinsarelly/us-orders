@@ -119,13 +119,14 @@ def fetch_orders(shop_domain, client_id, client_secret, start: date, end: date) 
                 continue
             seen_ids.add(oid)
 
+            order_date = datetime.fromisoformat(order["created_at"].replace("Z", "+00:00"))
+
             results.append({
                 "order_num": order.get("name", ""),
                 "tiktok_order": extract_tiktok_order(order.get("tags", "")),
                 "shopify_tracking": _shopify_tracking(order.get("fulfillments", [])),
+                "created_at": order_date.astimezone(us_tz).strftime("%Y-%m-%d"),
             })
-
-            order_date = datetime.fromisoformat(order["created_at"].replace("Z", "+00:00"))
             if oldest_dt is None or order_date < oldest_dt:
                 oldest_dt = order_date
 
@@ -374,9 +375,10 @@ if st.button("Fetch & Check Sync", type="primary"):
             issues_count["tracking_missing"] += 1
 
         rows.append({
+            "Order Date": o["created_at"],
             "Order #": num,
             "TikTok Order #": o["tiktok_order"],
-            "Camelot Status": camelot_status if not error else f"Not found",
+            "Camelot Status": camelot_status if not error else "Not found",
             "Camelot Tracking": camelot_tracking,
             "Shopify Tracking": shopify_tracking,
             "Issue": issue,
@@ -404,6 +406,7 @@ if st.button("Fetch & Check Sync", type="primary"):
             use_container_width=True,
             hide_index=True,
             column_config={
+                "Order Date": st.column_config.TextColumn(width="small"),
                 "Order #": st.column_config.TextColumn(width="small"),
                 "TikTok Order #": st.column_config.TextColumn(width="medium"),
                 "Camelot Status": st.column_config.TextColumn(width="small"),
