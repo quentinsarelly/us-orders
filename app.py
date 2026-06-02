@@ -415,6 +415,13 @@ if st.button("Fetch & Check Sync", type="primary"):
             "Issue": issue,
         })
 
+    st.session_state["rows"] = rows
+    st.session_state["issues_count"] = issues_count
+
+if "rows" in st.session_state:
+    rows = st.session_state["rows"]
+    issues_count = st.session_state["issues_count"]
+
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Total Orders", len(rows))
     m2.metric("🟢 Shipped & synced", issues_count["synced"])
@@ -432,7 +439,7 @@ if st.button("Fetch & Check Sync", type="primary"):
     st.divider()
 
     show_issues_only = st.checkbox("Show issues only", value=False)
-    display_rows = [r for r in rows if r["Issue"]] if show_issues_only else rows
+    display_rows = [r for r in rows if r["Issue"] and "🟢" not in r["Issue"]] if show_issues_only else rows
 
     if not display_rows:
         st.success("No sync issues found.")
