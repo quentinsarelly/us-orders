@@ -100,7 +100,7 @@ def fetch_orders(shop_domain, client_id, client_secret, start: date, end: date) 
         "created_at_min": start_dt.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "created_at_max": end_dt.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": "any",
-        "fields": "id,name,tags,created_at,fulfillments",
+        "fields": "id,name,tags,created_at,fulfillments,financial_status",
     }
 
     results = []
@@ -128,6 +128,7 @@ def fetch_orders(shop_domain, client_id, client_secret, start: date, end: date) 
                 "shopify_tracking": _shopify_tracking(order.get("fulfillments", [])),
                 "created_at": order_date.astimezone(us_tz).strftime("%Y-%m-%d"),
                 "shipped_by_tiktok": "shipped by tiktok" in tags.lower(),
+                "financial_status": order.get("financial_status", ""),
             })
             if oldest_dt is None or order_date < oldest_dt:
                 oldest_dt = order_date
@@ -216,7 +217,13 @@ def check_camelot_csv(orders: list[dict], lookup: dict) -> dict:
 
 _AWAITING_STATUSES = {"CHARGED", "COMMITTED", "PICK PRTD"}
 
-def _issue_label(camelot_result: dict, shopify_tracking: str, shipped_by_tiktok: bool = False) -> str:
+def _issue_label(camelot_result: dict, shopify_tracking: str,
+                 shipped_by_tiktok: bool = False, financial_status: str = "") -> str:
+    if financial_status in ("refunded", "voided", "partially_refunded"):
+        return "🟢 Refunded"
+    if financial_status == "pending":
+        return "🟠 Payment pending"
+
     if camelot_result.get("error") is not None:
         if shipped_by_tiktok:
             return "🟢 Shipped by TikTok"
@@ -396,7 +403,7 @@ if st.button("Fetch & Check Sync", type="primary"):
         camelot_tracking = status.get("tracking_number", "") if status else ""
         camelot_status = status.get("status", "") if status else ""
         shopify_tracking = o["shopify_tracking"]
-        issue = _issue_label(cr, shopify_tracking, o.get("shipped_by_tiktok", False))
+        issue = _issue_label(cr, shopify_tracking, o.get("shipped_by_tiktok", False), o.get("financial_status", ""))
 
         if issue == "🔴 Order not transmitted to Camelot":
             issues_count["not_transmitted"] += 1
@@ -406,8 +413,10 @@ if st.button("Fetch & Check Sync", type="primary"):
             issues_count["awaiting"] += 1
         elif issue == "🟡 Shipped but no Camelot tracking":
             issues_count["no_tracking"] += 1
-        elif issue in ("🟢 Shipped & synced", "🟢 Shipped by TikTok"):
+        elif issue in ("🟢 Shipped & synced", "🟢 Shipped by TikTok", "🟢 Refunded"):
             issues_count["synced"] += 1
+        elif issue == "🟠 Payment pending":
+            issues_count["awaiting"] += 1
 
         rows.append({
             "Order Date": o["created_at"],
