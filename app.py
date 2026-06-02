@@ -121,11 +121,13 @@ def fetch_orders(shop_domain, client_id, client_secret, start: date, end: date) 
 
             order_date = datetime.fromisoformat(order["created_at"].replace("Z", "+00:00"))
 
+            tags = order.get("tags", "")
             results.append({
                 "order_num": order.get("name", ""),
-                "tiktok_order": extract_tiktok_order(order.get("tags", "")),
+                "tiktok_order": extract_tiktok_order(tags),
                 "shopify_tracking": _shopify_tracking(order.get("fulfillments", [])),
                 "created_at": order_date.astimezone(us_tz).strftime("%Y-%m-%d"),
+                "shipped_by_tiktok": "shipped by tiktok" in tags.lower(),
             })
             if oldest_dt is None or order_date < oldest_dt:
                 oldest_dt = order_date
@@ -214,8 +216,10 @@ def check_camelot_csv(orders: list[dict], lookup: dict) -> dict:
 
 _AWAITING_STATUSES = {"CHARGED", "COMMITTED", "PICK PRTD"}
 
-def _issue_label(camelot_result: dict, shopify_tracking: str) -> str:
+def _issue_label(camelot_result: dict, shopify_tracking: str, shipped_by_tiktok: bool = False) -> str:
     if camelot_result.get("error") is not None:
+        if shipped_by_tiktok:
+            return "🟢 Shipped by TikTok"
         return "🔴 Order not transmitted to Camelot"
 
     status = camelot_result.get("status") or {}
@@ -392,7 +396,7 @@ if st.button("Fetch & Check Sync", type="primary"):
         camelot_tracking = status.get("tracking_number", "") if status else ""
         camelot_status = status.get("status", "") if status else ""
         shopify_tracking = o["shopify_tracking"]
-        issue = _issue_label(cr, shopify_tracking)
+        issue = _issue_label(cr, shopify_tracking, o.get("shipped_by_tiktok", False))
 
         if issue == "🔴 Order not transmitted to Camelot":
             issues_count["not_transmitted"] += 1
@@ -402,7 +406,7 @@ if st.button("Fetch & Check Sync", type="primary"):
             issues_count["awaiting"] += 1
         elif issue == "🟡 Shipped but no Camelot tracking":
             issues_count["no_tracking"] += 1
-        elif issue == "🟢 Shipped & synced":
+        elif issue in ("🟢 Shipped & synced", "🟢 Shipped by TikTok"):
             issues_count["synced"] += 1
 
         rows.append({
